@@ -1,0 +1,4 @@
+<?jelly escape-by-default='true'?>
+<div>
+    Das hier steht in der Plugin übersicht!
+</div>
