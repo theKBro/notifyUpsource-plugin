@@ -2,10 +2,12 @@ package io.jenkins.plugins.NotifyUpsource.freeStyleProj;
 
 import com.cloudbees.plugins.credentials.common.StandardListBoxModel;
 import com.cloudbees.plugins.credentials.impl.UsernamePasswordCredentialsImpl;
-import hudson.*;
+import edu.umd.cs.findbugs.annotations.NonNull;
+import hudson.EnvVars;
+import hudson.Extension;
+import hudson.FilePath;
+import hudson.Launcher;
 import hudson.model.*;
-import hudson.model.Run.Summary;
-import hudson.remoting.Channel;
 import hudson.security.ACL;
 import hudson.tasks.BuildWrapperDescriptor;
 import hudson.util.FormValidation;
@@ -15,23 +17,19 @@ import io.jenkins.plugins.NotifyUpsource.NotifyUpsourceWebService;
 import jenkins.model.Jenkins;
 import jenkins.tasks.SimpleBuildWrapper;
 import org.apache.commons.lang.StringUtils;
-import org.kohsuke.stapler.AncestorInPath;
 import org.kohsuke.stapler.DataBoundConstructor;
 import org.kohsuke.stapler.QueryParameter;
-
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
 import java.io.Serializable;
 import java.net.MalformedURLException;
-import java.util.Map;
 import java.util.logging.Logger;
 
-import static io.jenkins.plugins.NotifyUpsource.NotifyUpsourceWebService.debugSCMdata;
 
 // pipeline context requires serializable
 
 public class NotifyUpsourceBuildWrapper extends SimpleBuildWrapper implements Serializable {
+
+    //TODO: Change Url
+    final String urlJenkins = "http://localhost:8080/jenkins/"; //Schrägstrich am Ende des Links ist wichtig
 
     private final static Logger Log = Logger.getLogger(NotifyUpsourceBuildWrapper.class.getName());
 
@@ -40,14 +38,14 @@ public class NotifyUpsourceBuildWrapper extends SimpleBuildWrapper implements Se
      *
      * @serial
      */
-    private String credentialsId;
+    private final String credentialsId;
 
     /**
      * The project Id
      *
      * @serial
      */
-    private String projectId;
+    private final String projectId;
 
     public String getCredentialsId() {
         return credentialsId;
@@ -82,7 +80,7 @@ public class NotifyUpsourceBuildWrapper extends SimpleBuildWrapper implements Se
          * get from gui [string] $UpProjectID #the Upsource Project ID | abc
          */
 
-        public ListBoxModel doFillCredentialsIdItems(@AncestorInPath Item item, @QueryParameter String credentialsId) {
+        public ListBoxModel doFillCredentialsIdItems(@QueryParameter String credentialsId) {
             // item is the project
             StandardListBoxModel result = new StandardListBoxModel();
             return result
@@ -135,7 +133,7 @@ public class NotifyUpsourceBuildWrapper extends SimpleBuildWrapper implements Se
             }
 
             if (!NotifyUpsourceWebService.isUpsourceServerReachable(Url, "")) {
-                return FormValidation.warning("could not contact " + Url.toString());
+                return FormValidation.warning("could not contact " + Url);
             }
             return FormValidation.ok();
         }
@@ -146,6 +144,7 @@ public class NotifyUpsourceBuildWrapper extends SimpleBuildWrapper implements Se
             return true;//TODO: only allow this for item with instanceof FreeStyleProject;
         }
 
+        @NonNull
         @Override
         public String getDisplayName() {
             return "NotifyUpsource Plugin";
@@ -155,91 +154,69 @@ public class NotifyUpsourceBuildWrapper extends SimpleBuildWrapper implements Se
     // region buildwrapper
 
     @Override
-    public boolean requiresWorkspace() {
-        return false;
-    } // TODO: is it more easy if workspace is required?
-
-    @Override
-    protected boolean runPreCheckout() {
-        return true;
-    } // not needed if workspace is required
-
-    @Override
-    public Launcher decorateLauncher(AbstractBuild build, Launcher launcher, BuildListener listener)
-            throws IOException, InterruptedException, Run.RunnerAbortedException {
-        return new ScmListeningLauncher(super.decorateLauncher(build, launcher, listener));
-        // TODO only works for abstract builds...
-    }
-
-    @Override
     public void setUp(Context context, Run<?, ?> build, FilePath workspace, Launcher launcher, TaskListener listener,
-                      EnvVars initialEnvironment) throws IOException, InterruptedException {
+                      EnvVars initialEnvironment) {
         Log.info("notifyUpsource setup with workspace");
         setUp(context, build, listener, initialEnvironment);
     }
 
-    public void setUp(Context context, Run<?, ?> build, TaskListener listener, EnvVars initialEnvironment)
-            throws IOException, InterruptedException {
+    public void setUp(Context context, Run<?, ?> build, TaskListener listener, EnvVars initialEnvironment) {
         Log.info("notifyUpsource setup without workspace");
-        Summary status = build.getBuildStatusSummary();
-        Log.info("status: '" + status.toString() + "'");
-        Result res = build.getResult();
-        if (res != null)
-            Log.info("res: '" + res.toString() + "'");
-        context.setDisposer(new NotifyUpsourceDisposer());
+
+        UsernamePasswordCredentialsImpl credentials = CredentialHelper.findCredentials(credentialsId);
+        String upsourceServer = CredentialHelper.getUrlFromCredentials(credentials);
+
+        String upsourcePassword = credentials.getPassword().getPlainText(); //TODO: Ist das so gut? Mehr Infos hier: https://javadoc.jenkins-ci.org/hudson/util/Secret.html
+
+        String jProjectUrl = urlJenkins + build.getUrl();   //TODO: Passt das so?
+
+        String jProjectName = initialEnvironment.get("JOB_NAME");
+
+        String svnRevision = initialEnvironment.get("SVN_REVISION");
+
+        /*
+        String buildUrl = initialEnvironment.get("BUILD_URL");      //Liefert null zurück -> prüfen
+        Log.info(buildUrl);
+         */
+
+        NotifyUpsourceWebService upsourceConnection = new NotifyUpsourceWebService(upsourceServer + "/~buildStatus", projectId, upsourcePassword, jProjectUrl, jProjectName);
+        context.setDisposer(new NotifyUpsourceDisposer(upsourceConnection));
+
+        upsourceConnection.buildStarted(svnRevision);
+
+        /*
+        List<SubversionTagAction> svnTagActions = build.getActions(SubversionTagAction.class);
+        for (SubversionTagAction svnTagAction : svnTagActions) {
+            for (SubversionTagAction.TagInfo info : svnTagAction.getTagInfo()) {
+                upsourceConnection.buildStarted("186538");
+            }
+        }*/
+
     }
 
     //endregion
 
-    public static class ScmListeningLauncher extends Launcher.DecoratedLauncher {
-
-        public ScmListeningLauncher(Launcher inner) {
-            super(inner);
-        }
-
-        @Override
-        public Proc launch(ProcStarter starter) throws IOException {
-            return super.launch(starter);
-        }
-
-        @Override
-        public Channel launchChannel(String[] cmd, OutputStream out, FilePath workDir, Map<String, String> envVars)
-                throws IOException, InterruptedException {
-            return super.launchChannel(cmd, out, workDir, envVars);
-        }
-
-        @Override
-        public void kill(Map<String, String> modelEnvVars) throws IOException, InterruptedException {
-            super.kill(modelEnvVars);
-        }
-
-        @Override
-        public Proc launch(String[] cmd, boolean[] mask, String[] env, InputStream in, OutputStream out, FilePath workDir)
-                throws IOException {
-            return super.launch(cmd, mask, env, in, out, workDir);
-        }
-
-        @Override
-        public Proc launch(String[] cmd, String[] env, InputStream in, OutputStream out, FilePath workDir)
-                throws IOException {
-            return super.launch(cmd, env, in, out, workDir);
-        }
-
-        @Override
-        public String toString() {
-            return super.toString() + "; decorated";
-        }
-
-    }
-
     public static class NotifyUpsourceDisposer extends SimpleBuildWrapper.Disposer {
         private static final long serialVersionUID = 147517200825533249L;
 
+        private final NotifyUpsourceWebService upsourceConnection;
+
+        public NotifyUpsourceDisposer(NotifyUpsourceWebService upsourceConnection) {
+            this.upsourceConnection = upsourceConnection;
+        }
+
         @Override
-        public void tearDown(Run<?, ?> build, TaskListener listener) throws IOException, InterruptedException {
+        public void tearDown(Run<?, ?> build, FilePath workspace, Launcher launcher, TaskListener listener) {
             Log.info("notifyUpsource teardown");
-            debugSCMdata(build);
+            //debugSCMdata(build);
+            Result res = build.getResult();
+
+            if (res != null) {
+                upsourceConnection.buildFinished(res.isBetterOrEqualTo(Result.SUCCESS));
+            }
+            else {
+                upsourceConnection.buildFinished(true);
+            }
         }
     }
-
 }
